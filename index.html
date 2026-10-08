@@ -158,6 +158,21 @@ body,.side,.panel,.tw,.modal,.kpis,.btn,input,select,textarea{transition:backgro
 @media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
 </style>
 
+<style>
+#auth-screen{position:fixed;inset:0;z-index:999;background:#f1f5fc;display:flex;align-items:center;justify-content:center;padding:20px;font-family:"IBM Plex Sans",Arial,sans-serif}
+#auth-screen[hidden]{display:none!important}
+.auth-card{width:min(420px,100%);background:white;padding:34px;border-radius:20px;box-shadow:0 18px 50px #19366d1a;color:#19366d}
+.auth-logo{width:54px;height:54px;border-radius:14px;background:#27478f;color:white;display:grid;place-items:center;font-size:28px;margin:0 auto 12px}
+.auth-card h1{text-align:center;color:#19366d;font-size:28px;margin-bottom:6px}.auth-card p{text-align:center;color:#5d6d83;margin:0 0 22px}
+.auth-card label{display:block;margin:12px 0 4px;font-weight:600;font-size:13px}.auth-card input{color:#12201c;background:#fff}
+.auth-card button{width:100%;border:0;border-radius:9px;padding:11px;margin-top:14px;background:#27478f;color:white;font-weight:600}
+.auth-card button:disabled{opacity:.6}.auth-card .auth-link{background:transparent;color:#27478f;margin-top:4px}
+#auth-error{color:#a32424;font-size:13px;margin-top:10px;white-space:pre-wrap}
+</style>
+<div id="auth-screen"><div class="auth-card"><div class="auth-logo">⌂</div><h1>Casa em Ordem</h1><p>Sua vida financeira, organizada em um só lugar.</p>
+<form id="auth-form"><label for="auth-email">E-mail</label><input id="auth-email" type="email" autocomplete="username" required placeholder="seuemail@exemplo.com"><label for="auth-password">Senha</label><input id="auth-password" type="password" autocomplete="current-password" required placeholder="Sua senha"><button id="auth-submit" type="submit">Entrar</button></form>
+<div id="auth-error" role="status"></div></div></div>
+
 <div class="app">
   <aside class="side">
     <div class="brand">Casa em Ordem<small>Gestão financeira doméstica</small></div>
@@ -168,6 +183,7 @@ body,.side,.panel,.tw,.modal,.kpis,.btn,input,select,textarea{transition:backgro
 </div>
 <div id="layer"></div>
 
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
@@ -208,49 +224,63 @@ const ICONS={
 };
 const ico=n=>'<svg class="ico" viewBox="0 0 24 24" aria-hidden="true">'+ICONS[n]+'</svg>';
 
-/* ---------- dados e persistência ---------- */
+/* ---------- Supabase: autenticação e persistência ---------- */
+const SUPABASE_URL='https://rrbkgfqethpyaqaugiqf.supabase.co';
+const SUPABASE_KEY='sb_publishable_9xPC_PiYPDJZIpbyhPwe_w_4KJTNazb';
+const sb=window.supabase?.createClient(SUPABASE_URL,SUPABASE_KEY,{auth:{persistSession:true,autoRefreshToken:true,detectSessionInUrl:true}});
 const COLS=['contas','centros','carteiras','lanc','fornecedores','formas'];
-const LS='casaemordem.v1';
 let S={contas:[],centros:[],carteiras:[],lanc:[],fornecedores:[],formas:[]};
-let DB=null, syncMode='local';
-const lsSave=()=>{try{localStorage.setItem(LS,JSON.stringify(S))}catch(e){}};
-const lsLoad=()=>{try{const r=localStorage.getItem(LS);return r?JSON.parse(r):null}catch(e){return null}};
-let warned=false;
-const dbFail=()=>{if(!warned){warned=true;toast('Não foi possível gravar na nuvem. Os dados ficaram salvos neste navegador.')}};
+let currentUser=null,syncMode='nuvem';
+const emptyState=()=>Object.fromEntries(COLS.map(c=>[c,[]]));
+const fields={contas:['id','nome','codigo','tipo','exemplo'],centros:['id','nome','exemplo'],carteiras:['id','nome','tipo','saldoInicial','exemplo'],fornecedores:['id','nome','tipo','obs','exemplo'],formas:['id','nome','exemplo'],lanc:['id','tipo','descricao','pessoa','valor','venc','contaId','centroId','carteiraId','formaId','fornecedorId','obs','status','dataBaixa','valorBaixa','grupo','parcela','total','exemplo']};
+const required={contas:['id','nome','tipo'],centros:['id','nome'],carteiras:['id','nome'],fornecedores:['id','nome'],formas:['id','nome'],lanc:['id','tipo','descricao','valor','venc','status']};
+const rowData=(col,item)=>Object.fromEntries(fields[col].filter(k=>!required[col].includes(k)||item[k]!==undefined).map(k=>[k,item[k]===undefined||item[k]===''?(k==='exemplo'?false:null):item[k]]));
+const requireAuth=()=>{if(!currentUser)throw Error('Entre com seu e-mail e senha para salvar dados.')};
 async function put(col,item){
-  const i=S[col].findIndex(x=>x.id===item.id); if(i>=0)S[col][i]=item; else S[col].push(item);
-  lsSave();
-  if(DB){try{await DB.collection(col).doc(item.id).set(item)}catch(e){dbFail()}}
+ requireAuth();const row={...rowData(col,item),user_id:currentUser.id};
+ const {error}=await sb.from(col).upsert(row,{onConflict:'id'});if(error)throw error;
+ const i=S[col].findIndex(x=>x.id===item.id);if(i>=0)S[col][i]=item;else S[col].push(item);
 }
 async function putMany(col,items){
-  items.forEach(item=>{const i=S[col].findIndex(x=>x.id===item.id); if(i>=0)S[col][i]=item; else S[col].push(item)});
-  lsSave();
-  if(DB){try{await Promise.all(items.map(item=>DB.collection(col).doc(item.id).set(item)))}catch(e){dbFail()}}
+ requireAuth();if(!items.length)return;
+ for(let i=0;i<items.length;i+=100){
+  const rows=items.slice(i,i+100).map(x=>({...rowData(col,x),user_id:currentUser.id}));
+  const {error}=await sb.from(col).upsert(rows,{onConflict:'id'});if(error)throw error;
+  rows.forEach((_,j)=>{const item=items[i+j],idx=S[col].findIndex(x=>x.id===item.id);if(idx>=0)S[col][idx]=item;else S[col].push(item)});
+ }
 }
 async function del(col,ids){
-  ids=[].concat(ids); S[col]=S[col].filter(x=>!ids.includes(x.id)); lsSave();
-  if(DB){try{await Promise.all(ids.map(id=>DB.collection(col).doc(id).delete()))}catch(e){dbFail()}}
+ requireAuth();ids=[].concat(ids);if(!ids.length)return;
+ for(let i=0;i<ids.length;i+=100){const chunk=ids.slice(i,i+100);const {error}=await sb.from(col).delete().eq('user_id',currentUser.id).in('id',chunk);if(error)throw error}
+ S[col]=S[col].filter(x=>!ids.includes(x.id));
 }
 async function loadAll(){
-  const local=lsLoad();
-  try{ if(window.claude&&window.claude.use) DB=await window.claude.use('db'); }catch(e){DB=null}
-  if(DB){
-    try{
-      const res=await Promise.all(COLS.map(c=>DB.collection(c).get()));
-      const n={};COLS.forEach((c,i)=>n[c]=res[i].docs.map(d=>d.data()));
-      const has=COLS.some(c=>n[c].length);
-      if(has){S=n;lsSave()}
-      else if(local&&COLS.some(c=>(local[c]||[]).length)){
-        COLS.forEach(c=>S[c]=local[c]||[]);
-        for(const c of COLS){await Promise.all(S[c].map(x=>DB.collection(c).doc(x.id).set(x)))}
-        toast('Dados deste navegador enviados para a nuvem.');
-      }
-      syncMode='nuvem';
-    }catch(e){DB=null;syncMode='local';if(local)COLS.forEach(c=>S[c]=local[c]||[])}
-  } else if(local){COLS.forEach(c=>S[c]=local[c]||[])}
-  if(!DB)syncMode='local';
+ requireAuth();const next=emptyState();
+ for(const col of COLS){
+  let start=0;
+  while(true){const {data,error}=await sb.from(col).select('*').eq('user_id',currentUser.id).order('id').range(start,start+999);
+   if(error)throw error;next[col].push(...data.map(({user_id,...item})=>item));if(data.length<1000)break;start+=1000;
+  }
+ }
+ S=next;syncMode='nuvem';
 }
-
+const authScreen=document.getElementById('auth-screen');
+const authError=document.getElementById('auth-error');
+function showLogin(message=''){currentUser=null;S=emptyState();authScreen.hidden=false;authError.textContent=message;document.querySelector('.app').style.visibility='hidden'}
+async function enterApp(user){
+ currentUser=user;authError.textContent='Carregando dados da nuvem...';
+ try{await loadAll();await ensureDefaults();await syncFornecedores();authScreen.hidden=true;document.querySelector('.app').style.visibility='visible';render();openReminders(true)}
+ catch(e){showLogin('Falha ao carregar seus dados: '+e.message+' Atualize a página e tente novamente.');}
+}
+document.getElementById('auth-form').addEventListener('submit',async e=>{
+ e.preventDefault();if(!sb){authError.textContent='Biblioteca de conexão não carregou. Verifique sua internet.';return}
+ const button=document.getElementById('auth-submit');button.disabled=true;authError.textContent='Entrando...';
+ const {data,error}=await sb.auth.signInWithPassword({email:document.getElementById('auth-email').value.trim(),password:document.getElementById('auth-password').value});
+ document.getElementById('auth-password').value='';button.disabled=false;
+ if(error){authError.textContent='Não foi possível entrar: '+error.message;return}
+ await enterApp(data.user);
+});
+async function logout(){await sb.auth.signOut();showLogin('Você saiu da sua conta.');}
 /* ---------- regras ---------- */
 const st=l=>{if(l.status==='baixado')return 'baixado';const t=today();return l.venc<t?'vencido':l.venc===t?'hoje':'aberto'};
 const stLabel=(l)=>{const s=st(l);return s==='baixado'?(l.tipo==='pagar'?'Pago':'Recebido'):s==='vencido'?'Vencida':s==='hoje'?'Vence hoje':(l.tipo==='pagar'?'A pagar':'A receber')};
@@ -328,7 +358,7 @@ const TITLES={dash:'Painel',pagar:'Contas a pagar',receber:'Contas a receber',to
 function renderNav(){
   const late=S.lanc.filter(l=>abertas(l)&&l.venc<today()).length;
   $('#nav').innerHTML=Object.keys(TITLES).map(k=>`<button data-act="go" data-v="${k}" ${view===k?'aria-current="page"':''}>${ico({dash:'dash',pagar:'pagar',receber:'receber',todos:'lanc',extrato:'extrato',cad:'cad'}[k])}${TITLES[k]}</button>`).join('');
-  $('#syncinfo').textContent=syncMode==='nuvem'?'Dados salvos na nuvem':'Dados salvos neste navegador';
+  $('#syncinfo').innerHTML='Dados salvos na nuvem <button class="btn sm" id="logout-btn" style="margin-top:10px">Sair da conta</button>';
 }
 function toast(msg){
   document.querySelectorAll('.toast').forEach(t=>t.remove());
@@ -753,6 +783,7 @@ function render(){
 }
 function go(v){view=v;render();window.scrollTo(0,0)}
 document.addEventListener('click',async e=>{
+  if(e.target.closest('#logout-btn')){await logout();return}
   const b=e.target.closest('[data-act]');
   if(e.target.id==='ov'){closeModal();return}
   if(!b)return;
@@ -810,13 +841,11 @@ document.addEventListener('change',async e=>{
 document.addEventListener('keydown',e=>{if(e.key==='Escape')closeModal()});
 
 (async function init(){
-  applyTema();
-  render();
-  await loadAll();
-  await ensureDefaults();
-  await syncFornecedores();
-  render();
-  openReminders(true);
+ applyTema();showLogin('');
+ if(!sb){authError.textContent='Não foi possível carregar a conexão Supabase.';return}
+ const {data,error}=await sb.auth.getSession();
+ if(error){showLogin('Não foi possível verificar a sessão: '+error.message);return}
+ if(data.session?.user)await enterApp(data.session.user);
 })();
 })();
 </script>
